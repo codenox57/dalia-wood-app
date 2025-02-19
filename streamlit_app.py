@@ -6,7 +6,7 @@ from typing import List, Dict, Tuple
 import anthropic
 import json
 import asyncio
-from haystack.document_stores import InMemoryDocumentStore
+from haystack.document_stores import InMemoryDocumentStore # Import InMemoryDocumentStore
 from haystack.nodes import PreProcessor
 from haystack.schema import Document
 
