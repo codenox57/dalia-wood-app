@@ -6,7 +6,7 @@ from typing import List, Dict, Tuple
 import anthropic
 import json
 import asyncio
-from haystack.document_stores import InMemoryDocumentStore # Import InMemoryDocumentStore
+from haystack.document_stores import InMemoryDocumentStore
 from haystack.nodes import PreProcessor
 from haystack.schema import Document
 
@@ -21,67 +21,66 @@ if 'extracted_entities' not in st.session_state:
 if 'edited_texts' not in st.session_state:
     st.session_state.edited_texts = {}
 
-# Async function to process multiple texts with Claude Batch API
-async def process_texts_with_batch_api(texts: List[str], client: anthropic.AsyncAnthropic) -> List[Dict]:
-    # Create a message for each text
-    messages = []
-    for text in texts:
-        prompt = f"""
-        Extract all mentions of flowers or seeds and their associated quantities from the following text. 
-        Return the result as a Python dictionary where keys are the flower/seed names and values are their quantities.
-        If no quantity is mentioned for a flower/seed, set the value to None.
-        
-        TEXT:
-        {text}
-        
-        INSTRUCTIONS:
-        - Only extract flowers and seeds (no other plants or items)
-        - Normalize flower/seed names to their common form (e.g., 'roses' -> 'rose')
-        - Convert all quantities to numeric values where possible
-        - Return the result as a Python dictionary formatted like: {{"rose": 12, "sunflower seeds": 500}}
-        - Only return the dictionary, no additional text or explanation
-        """
-        
-        messages.append({
-            "model": "claude-3-opus-20240229",
-            "max_tokens": 1000,
-            "messages": [{"role": "user", "content": prompt}]
-        })
+# Function to create a prompt for extracting entities
+def create_extraction_prompt(text: str) -> str:
+    return f"""
+    Extract all mentions of flowers or seeds and their associated quantities from the following text. 
+    Return the result as a Python dictionary where keys are the flower/seed names and values are their quantities.
+    If no quantity is mentioned for a flower/seed, set the value to None.
     
-    # Use batching for more efficient processing
-    batch_response = await client.messages.batch.create(
-        messages=messages
+    TEXT:
+    {text}
+    
+    INSTRUCTIONS:
+    - Only extract flowers and seeds (no other plants or items)
+    - Normalize flower/seed names to their common form (e.g., 'roses' -> 'rose')
+    - Convert all quantities to numeric values where possible
+    - Return the result as a Python dictionary formatted like: {{"rose": 12, "sunflower seeds": 500}}
+    - Only return the dictionary, no additional text or explanation
+    """
+
+# Single async function to process one text with Claude
+async def process_text_with_claude(text: str, client: anthropic.AsyncAnthropic) -> Dict:
+    prompt = create_extraction_prompt(text)
+    
+    message = await client.messages.create(
+        model="claude-3-opus-20240229",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": prompt}]
     )
     
-    # Extract dictionaries from responses
-    extracted_entities = []
-    for response in batch_response:
-        try:
-            response_text = response.content[0].text
-            
-            # Look for dictionary-like patterns
-            import re
-            dict_pattern = r'\{[^{}]*\}'
-            dict_match = re.search(dict_pattern, response_text)
-            
-            if dict_match:
-                dict_str = dict_match.group(0)
-                # Safely evaluate the dictionary string to convert it to a Python dict
-                entities = eval(dict_str)
-                extracted_entities.append(entities)
-            else:
-                # Try to parse the entire response as a dictionary
-                response_text = response_text.strip()
-                if response_text.startswith('{') and response_text.endswith('}'):
-                    entities = eval(response_text)
-                    extracted_entities.append(entities)
-                else:
-                    extracted_entities.append({})
-        except Exception as e:
-            st.warning(f"Error parsing Claude's response: {e}")
-            extracted_entities.append({})
+    response_text = message.content[0].text
     
-    return extracted_entities
+    # Extract dictionary from response
+    try:
+        # Look for dictionary-like patterns
+        import re
+        dict_pattern = r'\{[^{}]*\}'
+        dict_match = re.search(dict_pattern, response_text)
+        
+        if dict_match:
+            dict_str = dict_match.group(0)
+            # Safely evaluate the dictionary string to convert it to a Python dict
+            return eval(dict_str)
+        else:
+            # Try to parse the entire response as a dictionary
+            response_text = response_text.strip()
+            if response_text.startswith('{') and response_text.endswith('}'):
+                return eval(response_text)
+            return {}
+    except Exception as e:
+        st.warning(f"Error parsing Claude's response: {e}")
+        return {}
+
+# Function to process multiple texts concurrently
+async def process_texts_concurrently(texts: List[str], api_key: str) -> List[Dict]:
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+    
+    # Create tasks for concurrent processing
+    tasks = [process_text_with_claude(text, client) for text in texts]
+    
+    # Run all tasks concurrently and return results
+    return await asyncio.gather(*tasks)
 
 # Function to process uploaded text files using Haystack
 def process_text_files(text_files) -> Dict[str, str]:
@@ -178,24 +177,22 @@ def main():
         
         # Button to process edited texts
         if st.button("Extract Flower and Seed References"):
-            with st.spinner("Processing with Claude Batch API..."):
+            with st.spinner("Processing voice notes concurrently..."):
                 try:
-                    # Initialize Claude client
+                    # Get API key from secrets or environment
                     api_key = st.secrets.get("ANTHROPIC_API_KEY", os.environ.get("ANTHROPIC_API_KEY"))
                     if not api_key:
                         st.error("Anthropic API key not found. Please set it in Streamlit secrets or environment variables.")
                         return
                     
-                    async_client = anthropic.AsyncAnthropic(api_key=api_key)
-                    
                     # Get list of texts to process
                     texts_to_process = list(st.session_state.edited_texts.values())
                     
-                    # Process with batch API
+                    # Process concurrently using asyncio
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     entity_results = loop.run_until_complete(
-                        process_texts_with_batch_api(texts_to_process, async_client)
+                        process_texts_concurrently(texts_to_process, api_key)
                     )
                     loop.close()
                     
@@ -208,7 +205,9 @@ def main():
                     st.success(f"Successfully processed {len(texts_to_process)} files and extracted {len(all_entities)} flower/seed references.")
                     
                 except Exception as e:
-                    st.error(f"Error processing with Claude Batch API: {e}")
+                    st.error(f"Error processing voice notes: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
     
     # Step 3: Review Extracted Entities and Update Spreadsheet
     if hasattr(st.session_state, 'extracted_entities') and st.session_state.extracted_entities:
